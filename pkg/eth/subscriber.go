@@ -355,6 +355,11 @@ func (s *WSSubscriber) readLoop() {
 		s.mu.Unlock()
 	}()
 
+	var (
+		lastDropLog  time.Time
+		droppedCount int64
+	)
+
 	for {
 		select {
 		case <-s.done:
@@ -395,8 +400,15 @@ func (s *WSSubscriber) readLoop() {
 				select {
 				case ch <- notification.Params.Result:
 				default:
-					s.logger.Warn("subscription channel full, dropping message",
-						"subscription_id", notification.Params.Subscription)
+					droppedCount++
+					now := time.Now()
+					if now.Sub(lastDropLog) >= 10*time.Second {
+						s.logger.Warn("subscription channel full, dropping messages",
+							"subscription_id", notification.Params.Subscription,
+							"dropped_count", droppedCount)
+						lastDropLog = now
+						droppedCount = 0
+					}
 				}
 			}
 		} else if notification.ID > 0 {
