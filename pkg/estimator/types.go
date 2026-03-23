@@ -47,6 +47,10 @@ type CalculatorInput struct {
 	RecentBlocks     []*BlockData
 	PendingTxs       []*TxData
 	PreviousEstimate *GasEstimate
+
+	// FallbackPriorityFee is the node's suggested priority fee from eth_maxPriorityFeePerGas.
+	// Used when both historical and mempool data are empty. Nil if unavailable.
+	FallbackPriorityFee *uint256.Int
 }
 
 // BlockData is a simplified view of block data for calculations.

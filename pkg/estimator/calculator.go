@@ -2,6 +2,7 @@ package estimator
 
 import (
 	"context"
+	"log/slog"
 	"slices"
 	"time"
 
@@ -18,7 +19,7 @@ type HybridStrategy struct {
 	MinPriorityFee *uint256.Int
 
 	// MaxPriorityFee is the ceiling for priority fee estimates (in wei)
-	// Default: 500 gwei
+	// Default: 10 gwei
 	MaxPriorityFee *uint256.Int
 
 	// HistoricalWeight determines the blend between historical and mempool data
@@ -36,7 +37,7 @@ type HybridStrategy struct {
 func DefaultStrategy() *HybridStrategy {
 	return &HybridStrategy{
 		MinPriorityFee:   uint256.NewInt(1e9),   // 1 gwei
-		MaxPriorityFee:   uint256.NewInt(500e9), // 500 gwei
+		MaxPriorityFee:   uint256.NewInt(10e9), // 10 gwei
 		HistoricalWeight: 0.3,
 		SmoothingFactor:  0.1,
 	}
@@ -95,10 +96,10 @@ func (s *HybridStrategy) Calculate(ctx context.Context, input *CalculatorInput) 
 		BlockNumber: input.CurrentBlock.Number,
 		Timestamp:   time.Now(),
 		BaseFee:     predictedBaseFee,
-		Urgent:      s.computeEstimate(predictedBaseFee, historicalFees, mempoolFees, 0.99),
-		Fast:        s.computeEstimate(predictedBaseFee, historicalFees, mempoolFees, 0.90),
-		Standard:    s.computeEstimate(predictedBaseFee, historicalFees, mempoolFees, 0.50),
-		Slow:        s.computeEstimate(predictedBaseFee, historicalFees, mempoolFees, 0.25),
+		Urgent:      s.computeEstimate(predictedBaseFee, historicalFees, mempoolFees, 0.99, input.FallbackPriorityFee),
+		Fast:        s.computeEstimate(predictedBaseFee, historicalFees, mempoolFees, 0.90, input.FallbackPriorityFee),
+		Standard:    s.computeEstimate(predictedBaseFee, historicalFees, mempoolFees, 0.50, input.FallbackPriorityFee),
+		Slow:        s.computeEstimate(predictedBaseFee, historicalFees, mempoolFees, 0.25, input.FallbackPriorityFee),
 	}
 
 	// Apply smoothing if we have a previous estimate
@@ -145,11 +146,13 @@ func (s *HybridStrategy) predictBaseFee(block *BlockData) *uint256.Int {
 }
 
 // computeEstimate calculates priority fee at a given percentile.
+// fallbackFee is the node's suggested priority fee from eth_maxPriorityFeePerGas (may be nil).
 func (s *HybridStrategy) computeEstimate(
 	baseFee *uint256.Int,
 	historical []*uint256.Int,
 	mempool []*uint256.Int,
 	percentile float64,
+	fallbackFee *uint256.Int,
 ) PriorityEstimate {
 	var priorityFee *uint256.Int
 
@@ -164,8 +167,20 @@ func (s *HybridStrategy) computeEstimate(
 		priorityFee = mempP
 	} else if histP != nil {
 		priorityFee = histP
+	} else if fallbackFee != nil {
+		// Use node's eth_maxPriorityFeePerGas as fallback
+		slog.Warn("no historical or mempool fee data, using eth_maxPriorityFeePerGas fallback",
+			"fallback_wei", fallbackFee.String(),
+			"percentile", percentile,
+		)
+		priorityFee = new(uint256.Int).Set(fallbackFee)
 	} else {
-		// No data available - use reasonable default based on percentile
+		// Last resort: interpolate between min and max based on percentile
+		slog.Warn("no fee data available, using hardcoded default priority fee",
+			"percentile", percentile,
+			"min_wei", s.MinPriorityFee.String(),
+			"max_wei", s.MaxPriorityFee.String(),
+		)
 		priorityFee = s.defaultPriorityFee(percentile)
 	}
 

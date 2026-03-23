@@ -20,6 +20,12 @@ type BlockReader interface {
 	ChainID(ctx context.Context) (uint64, error)
 }
 
+// FeeReader abstracts gas fee queries.
+type FeeReader interface {
+	// MaxPriorityFeePerGas returns the node's suggested priority fee via eth_maxPriorityFeePerGas.
+	MaxPriorityFeePerGas(ctx context.Context) (*uint256.Int, error)
+}
+
 // TxPoolReader abstracts mempool access.
 type TxPoolReader interface {
 	PendingTransactions(ctx context.Context, limit int) ([]*Transaction, error)
@@ -60,6 +66,15 @@ func (c *Client) ChainID(ctx context.Context) (uint64, error) {
 		return 0, err
 	}
 	return uint64(result), nil
+}
+
+// MaxPriorityFeePerGas returns the node's suggested priority fee via eth_maxPriorityFeePerGas.
+func (c *Client) MaxPriorityFeePerGas(ctx context.Context) (*uint256.Int, error) {
+	var result hexUint64
+	if err := c.call(ctx, "eth_maxPriorityFeePerGas", nil, &result); err != nil {
+		return nil, err
+	}
+	return uint256.NewInt(uint64(result)), nil
 }
 
 // LatestBlock returns the most recent block.

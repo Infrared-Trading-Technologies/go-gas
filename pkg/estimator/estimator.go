@@ -286,12 +286,21 @@ func (e *Estimator) buildInput(ctx context.Context) (*CalculatorInput, error) {
 		prevEstimate = est
 	}
 
+	// Fetch node's suggested priority fee as fallback for when hist+mempool data is empty.
+	var fallbackFee *uint256.Int
+	if fr, ok := e.client.(eth.FeeReader); ok {
+		if fee, err := fr.MaxPriorityFeePerGas(ctx); err == nil && fee != nil && !fee.IsZero() {
+			fallbackFee = fee
+		}
+	}
+
 	return &CalculatorInput{
-		ChainID:          e.chainID,
-		CurrentBlock:     blocks[0],
-		RecentBlocks:     blocks,
-		PendingTxs:       pendingTxs,
-		PreviousEstimate: prevEstimate,
+		ChainID:             e.chainID,
+		CurrentBlock:        blocks[0],
+		RecentBlocks:        blocks,
+		PendingTxs:          pendingTxs,
+		PreviousEstimate:    prevEstimate,
+		FallbackPriorityFee: fallbackFee,
 	}, nil
 }
 
