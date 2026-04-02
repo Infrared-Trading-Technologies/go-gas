@@ -2,6 +2,7 @@ package estimator
 
 import (
 	"context"
+	"math"
 	"testing"
 	"time"
 
@@ -9,12 +10,10 @@ import (
 )
 
 func TestHybridStrategy_Calculate(t *testing.T) {
-	// Helper to create uint256.Int
 	u256 := func(v uint64) *uint256.Int {
 		return uint256.NewInt(v)
 	}
 
-	// Helper to create a block
 	makeBlock := func(number uint64, baseFee uint64, gasUsed, gasLimit uint64, priorityFees []uint64) *BlockData {
 		fees := make([]*uint256.Int, len(priorityFees))
 		for i, f := range priorityFees {
@@ -37,7 +36,6 @@ func TestHybridStrategy_Calculate(t *testing.T) {
 		strategy    *HybridStrategy
 		input       *CalculatorInput
 		wantBaseFee *uint256.Int
-		wantUrgent  *uint256.Int // Expected Urgent Priority Fee
 		wantErr     bool
 	}{
 		{
@@ -62,7 +60,7 @@ func TestHybridStrategy_Calculate(t *testing.T) {
 				ChainID:      1,
 				CurrentBlock: makeBlock(100, 1000000000, 30000000, 30000000, nil), // 100% usage
 			},
-			// Delta = 1000000000 * (30000000 - 15000000) / 15000000 / 8 = 1000000000 * 1 / 8 = 125000000
+			// Delta = 1000000000 * (30000000 - 15000000) / 15000000 / 8 = 125000000
 			// New BaseFee = 1000000000 + 125000000 = 1125000000
 			wantBaseFee: u256(1125000000),
 		},
@@ -76,21 +74,6 @@ func TestHybridStrategy_Calculate(t *testing.T) {
 			// Delta = 1000000000 * (15000000 - 0) / 15000000 / 8 = 125000000
 			// New BaseFee = 1000000000 - 125000000 = 875000000
 			wantBaseFee: u256(875000000),
-		},
-		{
-			name:     "No data - defaults",
-			strategy: defaultStrategy,
-			input: &CalculatorInput{
-				ChainID:      1,
-				CurrentBlock: makeBlock(100, 1000000000, 15000000, 30000000, nil),
-			},
-			wantBaseFee: u256(1000000000),
-			// Default Urgent (99%)
-			// Min: 1 gwei, Max: 10 gwei
-			// Diff: 9 gwei
-			// Scaled: 9 * 99 / 100 = 8.91 gwei
-			// Result: 1 + 8.91 = 9.91 gwei = 9910000000
-			wantUrgent: u256(9910000000),
 		},
 	}
 
@@ -108,13 +91,22 @@ func TestHybridStrategy_Calculate(t *testing.T) {
 			if !got.BaseFee.Eq(tt.wantBaseFee) {
 				t.Errorf("Calculate() BaseFee = %v, want %v", got.BaseFee, tt.wantBaseFee)
 			}
-
-			if tt.wantUrgent != nil {
-				if !got.Urgent.MaxPriorityFeePerGas.Eq(tt.wantUrgent) {
-					t.Errorf("Calculate() Urgent Priority = %v, want %v", got.Urgent.MaxPriorityFeePerGas, tt.wantUrgent)
-				}
-			}
 		})
+	}
+}
+
+func TestComputeEstimate_NoData_UsesRelayFloor(t *testing.T) {
+	s := DefaultStrategy()
+	u256 := func(v uint64) *uint256.Int { return uint256.NewInt(v) }
+
+	baseFee := u256(1e9) // 1 gwei
+	tier := DefaultTiers["standard"]
+
+	// No historical, no mempool, no fallback -- should use MinPriorityFee (relay floor)
+	est := s.computeEstimate(baseFee, nil, nil, tier, nil)
+
+	if !est.MaxPriorityFeePerGas.Eq(s.MinPriorityFee) {
+		t.Errorf("expected relay floor %v, got %v", s.MinPriorityFee, est.MaxPriorityFeePerGas)
 	}
 }
 
@@ -124,40 +116,22 @@ func TestComputeEstimate_EmptyData_UsesFallback(t *testing.T) {
 
 	baseFee := u256(1e9) // 1 gwei
 	fallback := u256(2e9) // 2 gwei from eth_maxPriorityFeePerGas
+	tier := DefaultTiers["fast"]
 
 	// No historical or mempool data -- should use fallback
-	est := s.computeEstimate(baseFee, nil, nil, 0.90, fallback)
+	est := s.computeEstimate(baseFee, nil, nil, tier, fallback)
 
 	if !est.MaxPriorityFeePerGas.Eq(fallback) {
 		t.Errorf("expected fallback fee %v, got %v", fallback, est.MaxPriorityFeePerGas)
 	}
 
-	// MaxFeePerGas = baseFee*2 + priorityFee = 2e9 + 2e9 = 4e9
-	wantMax := u256(4e9)
+	// MaxFeePerGas = baseFee * 1.125^4 + priorityFee
+	// 1.125^4 = 1.601806640625
+	// baseFee * factor = 1e9 * 1.601806 = 1601806000 (with 6-digit precision: 1601806000)
+	// maxFee = 1601806000 + 2e9 = 3601806000
+	wantMax := u256(3601806000)
 	if !est.MaxFeePerGas.Eq(wantMax) {
 		t.Errorf("expected MaxFeePerGas %v, got %v", wantMax, est.MaxFeePerGas)
-	}
-}
-
-func TestComputeEstimate_EmptyData_NoFallback_UsesDefault(t *testing.T) {
-	s := DefaultStrategy()
-	u256 := func(v uint64) *uint256.Int { return uint256.NewInt(v) }
-
-	baseFee := u256(1e9)
-
-	// No historical, no mempool, no fallback -- should use defaultPriorityFee
-	est := s.computeEstimate(baseFee, nil, nil, 0.90, nil)
-
-	// With 10 gwei ceiling: diff=9 gwei, scaled=9*90/100=8.1 gwei, result=1+8.1=9.1 gwei
-	wantPriority := u256(9100000000)
-	if !est.MaxPriorityFeePerGas.Eq(wantPriority) {
-		t.Errorf("expected default priority fee %v, got %v", wantPriority, est.MaxPriorityFeePerGas)
-	}
-
-	// Verify it's reasonable (under 10 gwei ceiling)
-	ceiling := u256(10e9)
-	if est.MaxPriorityFeePerGas.Gt(ceiling) {
-		t.Errorf("priority fee %v exceeds ceiling %v", est.MaxPriorityFeePerGas, ceiling)
 	}
 }
 
@@ -166,10 +140,11 @@ func TestComputeEstimate_FallbackClamped(t *testing.T) {
 	u256 := func(v uint64) *uint256.Int { return uint256.NewInt(v) }
 
 	baseFee := u256(1e9)
-	// Fallback exceeds ceiling -- should be clamped to MaxPriorityFee (10 gwei)
-	fallback := u256(500e9)
+	// Fallback exceeds safety ceiling -- should be clamped to MaxPriorityFee (500 gwei)
+	fallback := u256(600e9)
+	tier := DefaultTiers["urgent"]
 
-	est := s.computeEstimate(baseFee, nil, nil, 0.90, fallback)
+	est := s.computeEstimate(baseFee, nil, nil, tier, fallback)
 
 	if !est.MaxPriorityFeePerGas.Eq(s.MaxPriorityFee) {
 		t.Errorf("expected clamped fee %v, got %v", s.MaxPriorityFee, est.MaxPriorityFeePerGas)
@@ -183,14 +158,156 @@ func TestComputeEstimate_HistoricalOverFallback(t *testing.T) {
 	baseFee := u256(1e9)
 	historical := []*uint256.Int{u256(3e9), u256(4e9), u256(5e9)}
 	fallback := u256(2e9)
+	tier := DefaultTiers["urgent"] // p90
 
 	// With historical data present, fallback should NOT be used
-	est := s.computeEstimate(baseFee, historical, nil, 0.90, fallback)
+	est := s.computeEstimate(baseFee, historical, nil, tier, fallback)
 
 	// 90th percentile of [3e9, 4e9, 5e9] = index 1.8 -> index 1 = 4e9
 	wantPriority := u256(4e9)
 	if !est.MaxPriorityFeePerGas.Eq(wantPriority) {
 		t.Errorf("expected historical fee %v, got %v", wantPriority, est.MaxPriorityFeePerGas)
+	}
+}
+
+func TestTierDifferentiation_LowActivity(t *testing.T) {
+	s := DefaultStrategy()
+	u256 := func(v uint64) *uint256.Int { return uint256.NewInt(v) }
+
+	baseFee := u256(170_000_000) // 0.17 gwei (typical low-activity mainnet)
+
+	// All tiers hit the 1 gwei relay floor for priority fee, but maxFeePerGas
+	// should differ because of per-tier base fee factors.
+	tiers := s.tiers()
+	slow := s.computeEstimate(baseFee, nil, nil, tiers["slow"], nil)
+	standard := s.computeEstimate(baseFee, nil, nil, tiers["standard"], nil)
+	fast := s.computeEstimate(baseFee, nil, nil, tiers["fast"], nil)
+	urgent := s.computeEstimate(baseFee, nil, nil, tiers["urgent"], nil)
+
+	// All priority fees should be the relay floor
+	for name, est := range map[string]PriorityEstimate{
+		"slow": slow, "standard": standard, "fast": fast, "urgent": urgent,
+	} {
+		if !est.MaxPriorityFeePerGas.Eq(s.MinPriorityFee) {
+			t.Errorf("%s: expected relay floor %v, got %v", name, s.MinPriorityFee, est.MaxPriorityFeePerGas)
+		}
+	}
+
+	// But maxFeePerGas should be strictly increasing: slow < standard < fast < urgent
+	if !slow.MaxFeePerGas.Lt(standard.MaxFeePerGas) {
+		t.Errorf("slow maxFee (%v) should be < standard (%v)", slow.MaxFeePerGas, standard.MaxFeePerGas)
+	}
+	if !standard.MaxFeePerGas.Lt(fast.MaxFeePerGas) {
+		t.Errorf("standard maxFee (%v) should be < fast (%v)", standard.MaxFeePerGas, fast.MaxFeePerGas)
+	}
+	if !fast.MaxFeePerGas.Lt(urgent.MaxFeePerGas) {
+		t.Errorf("fast maxFee (%v) should be < urgent (%v)", fast.MaxFeePerGas, urgent.MaxFeePerGas)
+	}
+}
+
+func TestTierDifferentiation_HighActivity(t *testing.T) {
+	s := DefaultStrategy()
+	u256 := func(v uint64) *uint256.Int { return uint256.NewInt(v) }
+
+	baseFee := u256(50e9) // 50 gwei
+
+	// Simulate a spread of priority fees with real variance
+	historical := make([]*uint256.Int, 100)
+	for i := range historical {
+		// Fees from 0.5 to 50 gwei
+		fee := uint64(500_000_000) + uint64(i)*uint64(500_000_000)
+		historical[i] = u256(fee)
+	}
+
+	tiers := s.tiers()
+	slow := s.computeEstimate(baseFee, historical, nil, tiers["slow"], nil)
+	standard := s.computeEstimate(baseFee, historical, nil, tiers["standard"], nil)
+	fast := s.computeEstimate(baseFee, historical, nil, tiers["fast"], nil)
+	urgent := s.computeEstimate(baseFee, historical, nil, tiers["urgent"], nil)
+
+	// Priority fees should be strictly increasing across tiers
+	if !slow.MaxPriorityFeePerGas.Lt(standard.MaxPriorityFeePerGas) {
+		t.Errorf("slow priority (%v) should be < standard (%v)",
+			slow.MaxPriorityFeePerGas, standard.MaxPriorityFeePerGas)
+	}
+	if !standard.MaxPriorityFeePerGas.Lt(fast.MaxPriorityFeePerGas) {
+		t.Errorf("standard priority (%v) should be < fast (%v)",
+			standard.MaxPriorityFeePerGas, fast.MaxPriorityFeePerGas)
+	}
+	if !fast.MaxPriorityFeePerGas.Lt(urgent.MaxPriorityFeePerGas) {
+		t.Errorf("fast priority (%v) should be < urgent (%v)",
+			fast.MaxPriorityFeePerGas, urgent.MaxPriorityFeePerGas)
+	}
+
+	// MaxFeePerGas should also be strictly increasing (both factors compound)
+	if !slow.MaxFeePerGas.Lt(standard.MaxFeePerGas) {
+		t.Errorf("slow maxFee (%v) should be < standard (%v)", slow.MaxFeePerGas, standard.MaxFeePerGas)
+	}
+	if !standard.MaxFeePerGas.Lt(fast.MaxFeePerGas) {
+		t.Errorf("standard maxFee (%v) should be < fast (%v)", standard.MaxFeePerGas, fast.MaxFeePerGas)
+	}
+	if !fast.MaxFeePerGas.Lt(urgent.MaxFeePerGas) {
+		t.Errorf("fast maxFee (%v) should be < urgent (%v)", fast.MaxFeePerGas, urgent.MaxFeePerGas)
+	}
+}
+
+func TestBaseFeeFactor_MatchesEIP1559(t *testing.T) {
+	// Verify that baseFeeFactorForBlocks produces the correct EIP-1559 values
+	tests := []struct {
+		blocks int
+		want   float64
+	}{
+		{1, 1.125},
+		{2, 1.265625},   // 1.125^2
+		{4, 1.601806640625}, // 1.125^4
+		{6, 2.02728652954102}, // 1.125^6
+	}
+
+	for _, tt := range tests {
+		got := baseFeeFactorForBlocks(tt.blocks)
+		if math.Abs(got-tt.want) > 1e-10 {
+			t.Errorf("baseFeeFactorForBlocks(%d) = %v, want %v", tt.blocks, got, tt.want)
+		}
+	}
+}
+
+func TestMulByFactor(t *testing.T) {
+	u256 := func(v uint64) *uint256.Int { return uint256.NewInt(v) }
+
+	tests := []struct {
+		name   string
+		val    *uint256.Int
+		factor float64
+		want   *uint256.Int
+	}{
+		{
+			name:   "2x multiplier",
+			val:    u256(1e9),
+			factor: 2.0,
+			want:   u256(2e9),
+		},
+		{
+			name:   "1.125x (1 block protection)",
+			val:    u256(1e9),
+			factor: 1.125,
+			want:   u256(1_125_000_000),
+		},
+		{
+			name:   "1.125^6 (6 block protection)",
+			val:    u256(1e9),
+			factor: baseFeeFactorForBlocks(6),
+			// 1e9 * 2.027286 (truncated to 6 decimal places) = 2027286000
+			want: u256(2_027_286_000),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := mulByFactor(tt.val, tt.factor)
+			if !got.Eq(tt.want) {
+				t.Errorf("mulByFactor(%v, %v) = %v, want %v", tt.val, tt.factor, got, tt.want)
+			}
+		})
 	}
 }
 
@@ -230,8 +347,7 @@ func TestHybridStrategy_Blend(t *testing.T) {
 			a:       u256(100),
 			b:       u256(200),
 			weightA: 0.75,
-			// 100 * 0.75 + 200 * 0.25 = 75 + 50 = 125
-			want: u256(125),
+			want:    u256(125),
 		},
 	}
 
@@ -242,5 +358,42 @@ func TestHybridStrategy_Blend(t *testing.T) {
 				t.Errorf("blend() = %v, want %v", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestDefaultTiers_Ordering(t *testing.T) {
+	tiers := DefaultTiers
+
+	// Percentiles should be strictly increasing
+	if tiers["slow"].Percentile >= tiers["standard"].Percentile {
+		t.Error("slow percentile should be < standard")
+	}
+	if tiers["standard"].Percentile >= tiers["fast"].Percentile {
+		t.Error("standard percentile should be < fast")
+	}
+	if tiers["fast"].Percentile >= tiers["urgent"].Percentile {
+		t.Error("fast percentile should be < urgent")
+	}
+
+	// Base fee factors should be strictly increasing
+	if tiers["slow"].BaseFeeFactor >= tiers["standard"].BaseFeeFactor {
+		t.Error("slow base fee factor should be < standard")
+	}
+	if tiers["standard"].BaseFeeFactor >= tiers["fast"].BaseFeeFactor {
+		t.Error("standard base fee factor should be < fast")
+	}
+	if tiers["fast"].BaseFeeFactor >= tiers["urgent"].BaseFeeFactor {
+		t.Error("fast base fee factor should be < urgent")
+	}
+
+	// Blocks protection should be strictly increasing
+	if tiers["slow"].BlocksProtection >= tiers["standard"].BlocksProtection {
+		t.Error("slow blocks protection should be < standard")
+	}
+	if tiers["standard"].BlocksProtection >= tiers["fast"].BlocksProtection {
+		t.Error("standard blocks protection should be < fast")
+	}
+	if tiers["fast"].BlocksProtection >= tiers["urgent"].BlocksProtection {
+		t.Error("fast blocks protection should be < urgent")
 	}
 }

@@ -3,49 +3,102 @@ package estimator
 import (
 	"context"
 	"log/slog"
+	"math"
 	"slices"
 	"time"
 
 	"github.com/holiman/uint256"
 )
 
+// TierConfig defines the parameters for a single gas estimation tier.
+// All values are derived from EIP-1559 math and standard statistical breakpoints.
+type TierConfig struct {
+	// Percentile of the blended historical+mempool priority fee distribution (0.0 to 1.0).
+	Percentile float64
+
+	// BaseFeeFactor is the multiplier applied to the predicted base fee for maxFeePerGas.
+	// Derived from EIP-1559: 1.125^N where N is the number of consecutive full blocks
+	// of base fee increase the transaction should survive without becoming unincludable.
+	BaseFeeFactor float64
+
+	// BlocksProtection is the semantic meaning behind BaseFeeFactor: how many consecutive
+	// full blocks of worst-case base fee increase this tier protects against.
+	BlocksProtection int
+}
+
+// baseFeeFactorForBlocks computes 1.125^n (the EIP-1559 max increase per block raised to n).
+func baseFeeFactorForBlocks(n int) float64 {
+	return math.Pow(1.125, float64(n))
+}
+
 // HybridStrategy implements a hybrid estimation approach combining:
 // 1. Historical block data (what fees were accepted)
 // 2. Mempool data (current competition)
 // 3. Base fee prediction (EIP-1559 formula)
+// 4. Per-tier differentiation via percentiles and EIP-1559-derived base fee factors
 type HybridStrategy struct {
-	// MinPriorityFee is the floor for priority fee estimates (in wei)
+	// MinPriorityFee is the relay floor for priority fee estimates (in wei).
+	// Derived from Geth's default txpool.pricelimit. Transactions below this
+	// won't be relayed by default-configured nodes.
+	// Applied uniformly across all tiers (not per-tier).
 	// Default: 1 gwei
 	MinPriorityFee *uint256.Int
 
-	// MaxPriorityFee is the ceiling for priority fee estimates (in wei)
-	// Default: 10 gwei
+	// MaxPriorityFee is a safety ceiling for priority fee estimates (in wei).
+	// Set high to avoid capping during genuine gas spikes.
+	// Default: 500 gwei
 	MaxPriorityFee *uint256.Int
 
-	// HistoricalWeight determines the blend between historical and mempool data
+	// HistoricalWeight determines the blend between historical and mempool data.
 	// 0.0 = mempool only, 1.0 = historical only
 	// Default: 0.3 (favor mempool for responsiveness)
 	HistoricalWeight float64
 
-	// SmoothingFactor for exponential moving average with previous estimate
+	// SmoothingFactor for exponential moving average with previous estimate.
 	// 0.0 = no smoothing, 1.0 = ignore new data
 	// Default: 0.1
 	SmoothingFactor float64
+
+	// Tiers defines the configuration for each estimation tier.
+	// If nil, DefaultTiers is used.
+	Tiers map[string]TierConfig
+}
+
+// DefaultTiers defines tier configurations derived from EIP-1559 math and
+// standard statistical percentile breakpoints.
+//
+// Percentiles: p10/p25/p50/p90 provide meaningful spread without p99 outlier sensitivity.
+// Base fee factors: 1.125^N where N = blocks of consecutive full-block base fee increase
+// the transaction can survive.
+var DefaultTiers = map[string]TierConfig{
+	"slow":     {Percentile: 0.10, BaseFeeFactor: baseFeeFactorForBlocks(1), BlocksProtection: 1},
+	"standard": {Percentile: 0.25, BaseFeeFactor: baseFeeFactorForBlocks(2), BlocksProtection: 2},
+	"fast":     {Percentile: 0.50, BaseFeeFactor: baseFeeFactorForBlocks(4), BlocksProtection: 4},
+	"urgent":   {Percentile: 0.90, BaseFeeFactor: baseFeeFactorForBlocks(6), BlocksProtection: 6},
 }
 
 // DefaultStrategy returns a HybridStrategy with sensible defaults.
 func DefaultStrategy() *HybridStrategy {
 	return &HybridStrategy{
-		MinPriorityFee:   uint256.NewInt(1e9),   // 1 gwei
-		MaxPriorityFee:   uint256.NewInt(10e9), // 10 gwei
+		MinPriorityFee:   uint256.NewInt(1e9),   // 1 gwei (Geth txpool.pricelimit default)
+		MaxPriorityFee:   uint256.NewInt(500e9),  // 500 gwei (safety ceiling only)
 		HistoricalWeight: 0.3,
 		SmoothingFactor:  0.1,
+		Tiers:            DefaultTiers,
 	}
 }
 
 // Name returns the strategy name.
 func (s *HybridStrategy) Name() string {
 	return "hybrid"
+}
+
+// tiers returns the configured tier map, falling back to DefaultTiers.
+func (s *HybridStrategy) tiers() map[string]TierConfig {
+	if s.Tiers != nil {
+		return s.Tiers
+	}
+	return DefaultTiers
 }
 
 // Calculate computes a gas estimate using the hybrid approach.
@@ -90,16 +143,18 @@ func (s *HybridStrategy) Calculate(ctx context.Context, input *CalculatorInput) 
 		return 0
 	})
 
-	// Compute estimates at each confidence level
+	tiers := s.tiers()
+
+	// Compute estimates at each confidence level using per-tier config
 	estimate := &GasEstimate{
 		ChainID:     input.ChainID,
 		BlockNumber: input.CurrentBlock.Number,
 		Timestamp:   time.Now(),
 		BaseFee:     predictedBaseFee,
-		Urgent:      s.computeEstimate(predictedBaseFee, historicalFees, mempoolFees, 0.99, input.FallbackPriorityFee),
-		Fast:        s.computeEstimate(predictedBaseFee, historicalFees, mempoolFees, 0.90, input.FallbackPriorityFee),
-		Standard:    s.computeEstimate(predictedBaseFee, historicalFees, mempoolFees, 0.50, input.FallbackPriorityFee),
-		Slow:        s.computeEstimate(predictedBaseFee, historicalFees, mempoolFees, 0.25, input.FallbackPriorityFee),
+		Urgent:      s.computeEstimate(predictedBaseFee, historicalFees, mempoolFees, tiers["urgent"], input.FallbackPriorityFee),
+		Fast:        s.computeEstimate(predictedBaseFee, historicalFees, mempoolFees, tiers["fast"], input.FallbackPriorityFee),
+		Standard:    s.computeEstimate(predictedBaseFee, historicalFees, mempoolFees, tiers["standard"], input.FallbackPriorityFee),
+		Slow:        s.computeEstimate(predictedBaseFee, historicalFees, mempoolFees, tiers["slow"], input.FallbackPriorityFee),
 	}
 
 	// Apply smoothing if we have a previous estimate
@@ -134,7 +189,6 @@ func (s *HybridStrategy) predictBaseFee(block *BlockData) *uint256.Int {
 		delta := new(uint256.Int).Mul(baseFee, uint256.NewInt(gasTarget-block.GasUsed))
 		delta.Div(delta, uint256.NewInt(gasTarget))
 		delta.Div(delta, uint256.NewInt(8))
-		// Check for underflow
 		if baseFee.Lt(delta) {
 			baseFee.SetUint64(0)
 		} else {
@@ -145,58 +199,65 @@ func (s *HybridStrategy) predictBaseFee(block *BlockData) *uint256.Int {
 	return baseFee
 }
 
-// computeEstimate calculates priority fee at a given percentile.
-// fallbackFee is the node's suggested priority fee from eth_maxPriorityFeePerGas (may be nil).
+// computeEstimate calculates priority fee and max fee for a given tier.
+// The tier's percentile determines where in the fee distribution to sample,
+// and the tier's base fee factor determines the base fee buffer in maxFeePerGas.
 func (s *HybridStrategy) computeEstimate(
 	baseFee *uint256.Int,
 	historical []*uint256.Int,
 	mempool []*uint256.Int,
-	percentile float64,
+	tier TierConfig,
 	fallbackFee *uint256.Int,
 ) PriorityEstimate {
 	var priorityFee *uint256.Int
 
-	histP := s.percentile(historical, percentile)
-	mempP := s.percentile(mempool, percentile)
+	histP := s.percentile(historical, tier.Percentile)
+	mempP := s.percentile(mempool, tier.Percentile)
 
 	if histP != nil && mempP != nil {
-		// Blend historical and mempool estimates
-		weighted := s.blend(histP, mempP, s.HistoricalWeight)
-		priorityFee = weighted
+		priorityFee = s.blend(histP, mempP, s.HistoricalWeight)
 	} else if mempP != nil {
 		priorityFee = mempP
 	} else if histP != nil {
 		priorityFee = histP
 	} else if fallbackFee != nil {
-		// Use node's eth_maxPriorityFeePerGas as fallback
 		slog.Warn("no historical or mempool fee data, using eth_maxPriorityFeePerGas fallback",
 			"fallback_wei", fallbackFee.String(),
-			"percentile", percentile,
+			"percentile", tier.Percentile,
 		)
 		priorityFee = new(uint256.Int).Set(fallbackFee)
 	} else {
-		// Last resort: interpolate between min and max based on percentile
-		slog.Warn("no fee data available, using hardcoded default priority fee",
-			"percentile", percentile,
+		slog.Warn("no fee data available, using relay minimum as priority fee",
+			"percentile", tier.Percentile,
 			"min_wei", s.MinPriorityFee.String(),
-			"max_wei", s.MaxPriorityFee.String(),
 		)
-		priorityFee = s.defaultPriorityFee(percentile)
+		priorityFee = new(uint256.Int).Set(s.MinPriorityFee)
 	}
 
-	// Clamp to min/max
+	// Apply relay floor and safety ceiling
 	priorityFee = s.clamp(priorityFee)
 
-	// Calculate maxFeePerGas: baseFee * 2 + priorityFee
-	// The 2x buffer handles up to ~6 consecutive full blocks
-	maxFee := new(uint256.Int).Mul(baseFee, uint256.NewInt(2))
+	// Calculate maxFeePerGas using per-tier base fee factor.
+	// factor = 1.125^N where N = blocks of base fee protection for this tier.
+	// maxFeePerGas = baseFee * factor + priorityFee
+	maxFee := mulByFactor(baseFee, tier.BaseFeeFactor)
 	maxFee.Add(maxFee, priorityFee)
 
 	return PriorityEstimate{
 		MaxPriorityFeePerGas: priorityFee,
 		MaxFeePerGas:         maxFee,
-		Confidence:           percentile,
+		Confidence:           tier.Percentile,
 	}
+}
+
+// mulByFactor multiplies a uint256.Int by a float64 factor using fixed-point arithmetic.
+// Precision: 6 decimal places (multiply by 1e6, then divide).
+func mulByFactor(val *uint256.Int, factor float64) *uint256.Int {
+	const precision = 1_000_000
+	factorInt := uint64(factor * precision)
+	result := new(uint256.Int).Mul(val, uint256.NewInt(factorInt))
+	result.Div(result, uint256.NewInt(precision))
+	return result
 }
 
 // percentile calculates the value at the given percentile (0.0 to 1.0).
@@ -206,15 +267,12 @@ func (s *HybridStrategy) percentile(values []*uint256.Int, p float64) *uint256.I
 		return nil
 	}
 
-	// Calculate index
 	idx := int(float64(len(values)-1) * p)
 	return new(uint256.Int).Set(values[idx])
 }
 
 // blend computes a weighted average of two uint256.Int values.
 func (s *HybridStrategy) blend(a, b *uint256.Int, weightA float64) *uint256.Int {
-	// result = a * weightA + b * (1 - weightA)
-	// Using integer math: result = (a * wA + b * wB) / 100 where wA + wB = 100
 	wA := uint64(weightA * 100)
 	wB := 100 - wA
 
@@ -227,21 +285,7 @@ func (s *HybridStrategy) blend(a, b *uint256.Int, weightA float64) *uint256.Int 
 	return result
 }
 
-// defaultPriorityFee returns a sensible default based on confidence level.
-func (s *HybridStrategy) defaultPriorityFee(percentile float64) *uint256.Int {
-	// Scale between min and max based on percentile
-	// Higher percentile = higher fee
-	min := new(uint256.Int).Set(s.MinPriorityFee)
-	max := new(uint256.Int).Set(s.MaxPriorityFee)
-
-	diff := new(uint256.Int).Sub(max, min)
-	scaled := new(uint256.Int).Mul(diff, uint256.NewInt(uint64(percentile*100)))
-	scaled.Div(scaled, uint256.NewInt(100))
-
-	return new(uint256.Int).Add(min, scaled)
-}
-
-// clamp ensures the priority fee is within bounds.
+// clamp ensures the priority fee is within the relay floor and safety ceiling.
 func (s *HybridStrategy) clamp(fee *uint256.Int) *uint256.Int {
 	if fee.Lt(s.MinPriorityFee) {
 		return new(uint256.Int).Set(s.MinPriorityFee)
@@ -269,7 +313,6 @@ func (s *HybridStrategy) smooth(current, previous *GasEstimate) *GasEstimate {
 }
 
 func (s *HybridStrategy) smoothEstimate(current, previous PriorityEstimate, factor float64) PriorityEstimate {
-	// new = current * (1 - factor) + previous * factor
 	smoothedPriority := s.blend(previous.MaxPriorityFeePerGas, current.MaxPriorityFeePerGas, factor)
 	smoothedMax := s.blend(previous.MaxFeePerGas, current.MaxFeePerGas, factor)
 

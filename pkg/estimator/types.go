@@ -18,12 +18,13 @@ type GasEstimate struct {
 	// Predicted base fee for next block (EIP-1559)
 	BaseFee *uint256.Int
 
-	// Priority fee estimates at different confidence levels
-	// Higher confidence = faster inclusion, higher price
-	Urgent   PriorityEstimate // 99th percentile, ~1 block inclusion
-	Fast     PriorityEstimate // 90th percentile, ~3 blocks
-	Standard PriorityEstimate // 50th percentile, ~6 blocks
-	Slow     PriorityEstimate // 25th percentile, ~12+ blocks
+	// Priority fee estimates at different confidence levels.
+	// Each tier uses a different percentile of the fee distribution and a different
+	// base fee buffer (1.125^N) derived from EIP-1559 math.
+	Urgent   PriorityEstimate // p90, 6-block base fee protection
+	Fast     PriorityEstimate // p50, 4-block base fee protection
+	Standard PriorityEstimate // p25, 2-block base fee protection
+	Slow     PriorityEstimate // p10, 1-block base fee protection
 }
 
 // PriorityEstimate represents a gas estimate at a specific confidence level.
@@ -31,8 +32,8 @@ type PriorityEstimate struct {
 	// MaxPriorityFeePerGas is the tip to miners/validators
 	MaxPriorityFeePerGas *uint256.Int
 
-	// MaxFeePerGas is the total max fee (baseFee * 2 + priorityFee)
-	// The 2x buffer handles base fee volatility
+	// MaxFeePerGas is the total max fee (baseFee * factor + priorityFee)
+	// where factor = 1.125^N, derived from the tier's base fee protection level
 	MaxFeePerGas *uint256.Int
 
 	// Confidence is the probability of inclusion (0.0 to 1.0)
