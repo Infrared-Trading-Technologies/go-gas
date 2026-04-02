@@ -65,3 +65,7 @@ coverage.txt
 
 # Compiled binary (project specific)
 go-gas
+
+# mcp files
+*.mcp
+.mcp.json
