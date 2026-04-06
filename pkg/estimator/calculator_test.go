@@ -95,18 +95,19 @@ func TestHybridStrategy_Calculate(t *testing.T) {
 	}
 }
 
-func TestComputeEstimate_NoData_UsesRelayFloor(t *testing.T) {
+func TestComputeEstimate_NoData_Uses1Wei(t *testing.T) {
 	s := DefaultStrategy()
 	u256 := func(v uint64) *uint256.Int { return uint256.NewInt(v) }
 
 	baseFee := u256(1e9) // 1 gwei
 	tier := DefaultTiers["standard"]
 
-	// No historical, no mempool, no fallback -- should use MinPriorityFee (relay floor)
+	// No historical, no mempool, no fallback -- should use 1 wei (near-zero)
 	est := s.computeEstimate(baseFee, nil, nil, tier, nil)
 
-	if !est.MaxPriorityFeePerGas.Eq(s.MinPriorityFee) {
-		t.Errorf("expected relay floor %v, got %v", s.MinPriorityFee, est.MaxPriorityFeePerGas)
+	oneWei := uint256.NewInt(1)
+	if !est.MaxPriorityFeePerGas.Eq(oneWei) {
+		t.Errorf("expected 1 wei, got %v", est.MaxPriorityFeePerGas)
 	}
 }
 
@@ -174,26 +175,26 @@ func TestTierDifferentiation_LowActivity(t *testing.T) {
 	s := DefaultStrategy()
 	u256 := func(v uint64) *uint256.Int { return uint256.NewInt(v) }
 
-	baseFee := u256(170_000_000) // 0.17 gwei (typical low-activity mainnet)
+	baseFee := u256(170_000_000) // 0.17 gwei (typical low-activity chain)
 
-	// All tiers hit the 1 gwei relay floor for priority fee, but maxFeePerGas
-	// should differ because of per-tier base fee factors.
+	// With no fee data, all tiers get 1 wei priority fee.
+	// maxFeePerGas should still differ because of per-tier base fee factors.
 	tiers := s.tiers()
 	slow := s.computeEstimate(baseFee, nil, nil, tiers["slow"], nil)
 	standard := s.computeEstimate(baseFee, nil, nil, tiers["standard"], nil)
 	fast := s.computeEstimate(baseFee, nil, nil, tiers["fast"], nil)
 	urgent := s.computeEstimate(baseFee, nil, nil, tiers["urgent"], nil)
 
-	// All priority fees should be the relay floor
+	oneWei := uint256.NewInt(1)
 	for name, est := range map[string]PriorityEstimate{
 		"slow": slow, "standard": standard, "fast": fast, "urgent": urgent,
 	} {
-		if !est.MaxPriorityFeePerGas.Eq(s.MinPriorityFee) {
-			t.Errorf("%s: expected relay floor %v, got %v", name, s.MinPriorityFee, est.MaxPriorityFeePerGas)
+		if !est.MaxPriorityFeePerGas.Eq(oneWei) {
+			t.Errorf("%s: expected 1 wei, got %v", name, est.MaxPriorityFeePerGas)
 		}
 	}
 
-	// But maxFeePerGas should be strictly increasing: slow < standard < fast < urgent
+	// maxFeePerGas should be strictly increasing: slow < standard < fast < urgent
 	if !slow.MaxFeePerGas.Lt(standard.MaxFeePerGas) {
 		t.Errorf("slow maxFee (%v) should be < standard (%v)", slow.MaxFeePerGas, standard.MaxFeePerGas)
 	}
@@ -202,6 +203,50 @@ func TestTierDifferentiation_LowActivity(t *testing.T) {
 	}
 	if !fast.MaxFeePerGas.Lt(urgent.MaxFeePerGas) {
 		t.Errorf("fast maxFee (%v) should be < urgent (%v)", fast.MaxFeePerGas, urgent.MaxFeePerGas)
+	}
+}
+
+func TestTierDifferentiation_LowFeeChain(t *testing.T) {
+	s := DefaultStrategy()
+	u256 := func(v uint64) *uint256.Int { return uint256.NewInt(v) }
+
+	baseFee := u256(115_000_000) // ~0.115 gwei (typical Berachain)
+
+	// Sub-gwei priority fees (10M to 900M wei = 0.01 to 0.9 gwei)
+	historical := make([]*uint256.Int, 100)
+	for i := range historical {
+		fee := uint64(10_000_000) + uint64(i)*uint64(9_000_000)
+		historical[i] = u256(fee)
+	}
+
+	tiers := s.tiers()
+	slow := s.computeEstimate(baseFee, historical, nil, tiers["slow"], nil)
+	standard := s.computeEstimate(baseFee, historical, nil, tiers["standard"], nil)
+	fast := s.computeEstimate(baseFee, historical, nil, tiers["fast"], nil)
+	urgent := s.computeEstimate(baseFee, historical, nil, tiers["urgent"], nil)
+
+	// Priority fees must be differentiated, not clamped to a common floor
+	if !slow.MaxPriorityFeePerGas.Lt(standard.MaxPriorityFeePerGas) {
+		t.Errorf("slow priority (%v) should be < standard (%v)",
+			slow.MaxPriorityFeePerGas, standard.MaxPriorityFeePerGas)
+	}
+	if !standard.MaxPriorityFeePerGas.Lt(fast.MaxPriorityFeePerGas) {
+		t.Errorf("standard priority (%v) should be < fast (%v)",
+			standard.MaxPriorityFeePerGas, fast.MaxPriorityFeePerGas)
+	}
+	if !fast.MaxPriorityFeePerGas.Lt(urgent.MaxPriorityFeePerGas) {
+		t.Errorf("fast priority (%v) should be < urgent (%v)",
+			fast.MaxPriorityFeePerGas, urgent.MaxPriorityFeePerGas)
+	}
+
+	// All priority fees should be below 1 gwei (no artificial floor)
+	oneGwei := u256(1e9)
+	for name, est := range map[string]PriorityEstimate{
+		"slow": slow, "standard": standard, "fast": fast, "urgent": urgent,
+	} {
+		if !est.MaxPriorityFeePerGas.Lt(oneGwei) {
+			t.Errorf("%s: priority fee %v should be < 1 gwei", name, est.MaxPriorityFeePerGas)
+		}
 	}
 }
 

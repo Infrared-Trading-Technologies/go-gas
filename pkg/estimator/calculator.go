@@ -37,15 +37,8 @@ func baseFeeFactorForBlocks(n int) float64 {
 // 3. Base fee prediction (EIP-1559 formula)
 // 4. Per-tier differentiation via percentiles and EIP-1559-derived base fee factors
 type HybridStrategy struct {
-	// MinPriorityFee is the relay floor for priority fee estimates (in wei).
-	// Derived from Geth's default txpool.pricelimit. Transactions below this
-	// won't be relayed by default-configured nodes.
-	// Applied uniformly across all tiers (not per-tier).
-	// Default: 1 gwei
-	MinPriorityFee *uint256.Int
-
 	// MaxPriorityFee is a safety ceiling for priority fee estimates (in wei).
-	// Set high to avoid capping during genuine gas spikes.
+	// Prevents runaway estimates during anomalous mempool conditions.
 	// Default: 500 gwei
 	MaxPriorityFee *uint256.Int
 
@@ -80,8 +73,7 @@ var DefaultTiers = map[string]TierConfig{
 // DefaultStrategy returns a HybridStrategy with sensible defaults.
 func DefaultStrategy() *HybridStrategy {
 	return &HybridStrategy{
-		MinPriorityFee:   uint256.NewInt(1e9),   // 1 gwei (Geth txpool.pricelimit default)
-		MaxPriorityFee:   uint256.NewInt(500e9),  // 500 gwei (safety ceiling only)
+		MaxPriorityFee:   uint256.NewInt(500e9), // 500 gwei (safety ceiling only)
 		HistoricalWeight: 0.3,
 		SmoothingFactor:  0.1,
 		Tiers:            DefaultTiers,
@@ -227,14 +219,13 @@ func (s *HybridStrategy) computeEstimate(
 		)
 		priorityFee = new(uint256.Int).Set(fallbackFee)
 	} else {
-		slog.Warn("no fee data available, using relay minimum as priority fee",
+		slog.Warn("no fee data available, using 1 wei as priority fee",
 			"percentile", tier.Percentile,
-			"min_wei", s.MinPriorityFee.String(),
 		)
-		priorityFee = new(uint256.Int).Set(s.MinPriorityFee)
+		priorityFee = uint256.NewInt(1)
 	}
 
-	// Apply relay floor and safety ceiling
+	// Apply safety ceiling
 	priorityFee = s.clamp(priorityFee)
 
 	// Calculate maxFeePerGas using per-tier base fee factor.
@@ -285,12 +276,9 @@ func (s *HybridStrategy) blend(a, b *uint256.Int, weightA float64) *uint256.Int 
 	return result
 }
 
-// clamp ensures the priority fee is within the relay floor and safety ceiling.
+// clamp ensures the priority fee does not exceed the safety ceiling.
 func (s *HybridStrategy) clamp(fee *uint256.Int) *uint256.Int {
-	if fee.Lt(s.MinPriorityFee) {
-		return new(uint256.Int).Set(s.MinPriorityFee)
-	}
-	if fee.Gt(s.MaxPriorityFee) {
+	if s.MaxPriorityFee != nil && fee.Gt(s.MaxPriorityFee) {
 		return new(uint256.Int).Set(s.MaxPriorityFee)
 	}
 	return fee
