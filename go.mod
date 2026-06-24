@@ -1,4 +1,4 @@
-module github.com/branched-services/go-gas
+module github.com/Infrared-Trading-Technologies/go-gas
 
 go 1.22
 

@@ -4,8 +4,8 @@ High-performance, ultra low-latency Ethereum gas price estimator for Go.
 
 `go-gas` is designed for high-frequency trading, MEV bots, and real-time applications where millisecond-latency matters. It uses a push-based architecture and highly optimized arithmetic (via `uint256`) to deliver gas estimates with minimal heap allocations.
 
-[![Go Reference](https://pkg.go.dev/badge/github.com/branched-services/go-gas.svg)](https://pkg.go.dev/github.com/branched-services/go-gas)
-[![Go Report Card](https://goreportcard.com/badge/github.com/branched-services/go-gas)](https://goreportcard.com/report/github.com/branched-services/go-gas)
+[![Go Reference](https://pkg.go.dev/badge/github.com/Infrared-Trading-Technologies/go-gas.svg)](https://pkg.go.dev/github.com/Infrared-Trading-Technologies/go-gas)
+[![Go Report Card](https://goreportcard.com/badge/github.com/Infrared-Trading-Technologies/go-gas)](https://goreportcard.com/report/github.com/Infrared-Trading-Technologies/go-gas)
 
 ## Features
 
@@ -47,7 +47,7 @@ See [BENCHMARKS.md](BENCHMARKS.md) for the latest results and a detailed history
 ## Installation
 
 ```bash
-go get github.com/branched-services/go-gas
+go get github.com/Infrared-Trading-Technologies/go-gas
 ```
 
 ## Usage
@@ -70,8 +70,8 @@ import (
 
 	"log/slog"
 
-	"github.com/branched-services/go-gas/pkg/estimator"
-	"github.com/branched-services/go-gas/pkg/eth"
+	"github.com/Infrared-Trading-Technologies/go-gas/pkg/estimator"
+	"github.com/Infrared-Trading-Technologies/go-gas/pkg/eth"
 )
 
 func main() {
@@ -180,14 +180,14 @@ docker run -d \
   -e GAS_NODE_HTTP_URL=https://eth-mainnet.alchemyapi.io/v2/YOUR_KEY \
   -e GAS_NODE_WS_URL=wss://eth-mainnet.alchemyapi.io/v2/YOUR_KEY \
   -p 8080:8080 \
-  ghcr.io/branched-services/go-gas:latest
+  ghcr.io/infrared-trading-technologies/go-gas:latest
 ```
 
 #### 3. Run from Source
 
 ```bash
 # Clone and build
-git clone https://github.com/branched-services/go-gas.git
+git clone https://github.com/Infrared-Trading-Technologies/go-gas.git
 cd go-gas
 go build -o gas-estimator cmd/estimator/main.go
 

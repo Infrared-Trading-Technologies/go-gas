@@ -3,7 +3,7 @@ package estimator
 import (
 	"sync"
 
-	"github.com/branched-services/go-gas/pkg/eth"
+	"github.com/Infrared-Trading-Technologies/go-gas/pkg/eth"
 )
 
 // LocalTxPool maintains a ring buffer of recent pending transactions.

@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/branched-services/go-gas/pkg/eth"
+	"github.com/Infrared-Trading-Technologies/go-gas/pkg/eth"
 	"github.com/holiman/uint256"
 )
 

@@ -11,12 +11,12 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/branched-services/go-gas/internal/api/grpc"
-	"github.com/branched-services/go-gas/internal/config"
-	"github.com/branched-services/go-gas/internal/observability"
-	"github.com/branched-services/go-gas/pkg/estimator"
-	"github.com/branched-services/go-gas/pkg/eth"
-	"github.com/branched-services/go-gas/pkg/health"
+	"github.com/Infrared-Trading-Technologies/go-gas/internal/api/grpc"
+	"github.com/Infrared-Trading-Technologies/go-gas/internal/config"
+	"github.com/Infrared-Trading-Technologies/go-gas/internal/observability"
+	"github.com/Infrared-Trading-Technologies/go-gas/pkg/estimator"
+	"github.com/Infrared-Trading-Technologies/go-gas/pkg/eth"
+	"github.com/Infrared-Trading-Technologies/go-gas/pkg/health"
 )
 
 func main() {

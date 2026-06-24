@@ -10,7 +10,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/branched-services/go-gas/pkg/estimator"
+	"github.com/Infrared-Trading-Technologies/go-gas/pkg/estimator"
 )
 
 // Note: This is a simplified HTTP/JSON implementation.

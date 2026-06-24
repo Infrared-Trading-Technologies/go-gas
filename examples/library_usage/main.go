@@ -11,8 +11,8 @@ import (
 
 	"log/slog"
 
-	"github.com/branched-services/go-gas/pkg/estimator"
-	"github.com/branched-services/go-gas/pkg/eth"
+	"github.com/Infrared-Trading-Technologies/go-gas/pkg/estimator"
+	"github.com/Infrared-Trading-Technologies/go-gas/pkg/eth"
 )
 
 func main() {
